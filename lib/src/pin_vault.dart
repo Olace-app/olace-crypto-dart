@@ -7,11 +7,18 @@ import 'p2p_crypto.dart';
 
 /// Result of PIN vault key derivation ([PinVault.deriveVaultKey]).
 class PinVaultKeys {
-  /// The peppered vault key — encrypts the recovery key, produces the auth tag.
+  /// The peppered vault key: encrypts the recovery key, produces the auth tag.
   final SecretKey vaultKey;
+
+  /// HMAC over a fixed constant under the vault key. Proves knowledge of
+  /// the correctly derived vault key without revealing it.
   final Uint8List authTag;
+
+  /// [authTag] as lowercase hex. The server stores only the SHA-256 of
+  /// this tag (see [PinVault.hashAuthTag]), never the tag itself.
   final String authTagHex;
 
+  /// Bundles the outputs of [PinVault.deriveVaultKey].
   PinVaultKeys({
     required this.vaultKey,
     required this.authTag,

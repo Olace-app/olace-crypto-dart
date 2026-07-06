@@ -4,12 +4,13 @@ The client-side cryptography of [Olace](https://olace.app). This package contain
 
 ## What is in this package
 
-- `src/zk_crypto.dart`: zero-knowledge backup encryption. Master Key (MK) wrapping under the Recovery Key, per-purpose HKDF-SHA256 data keys, and the `zk1` AES-256-GCM envelope used for conversations, projects, research context, instructions, the BYOK key vault, media blobs, and attachment metadata. The server stores these envelopes opaquely and holds no key that opens them.
+- `src/zk_crypto.dart`: zero-knowledge backup encryption. Master Key (MK) wrapping under the Recovery Key, per-purpose HKDF-SHA256 data keys, and the `zk1` AES-256-GCM envelope used for conversations, projects, research context, instructions, and the BYOK key vault. Media blobs and attachment metadata use the same per-purpose scheme with a bare `nonce || ciphertext || tag` layout (no prefix). The server stores all of it opaquely and holds no key that opens it.
 - `src/pin_vault.dart`: the PIN vault's three-stage derivation. Argon2id over the PIN, a blinded HMAC round-trip so the server can apply its KMS-held pepper without ever seeing the PIN, and the vault envelope for the Recovery Key. A database-only leak has no pepper and cannot brute-force vaults offline.
 - `src/recovery_key.dart`: Crockford Base32 Recovery Key formatting and tolerant parsing.
 - `src/p2p_crypto.dart`: the E2EE session core for paired devices. X25519 key agreement, HKDF-SHA256 session keys, AES-256-GCM framing with replay protection, HMAC transcript signing. Byte-compatible mirror of the Go daemon side, [olace-e2ee-go](https://github.com/Olace-app/olace-e2ee-go).
 - `src/mk_transfer_crypto.dart`: device-to-device Master Key transfer. Ephemeral X25519, a number-match short authentication string both devices derive independently, and an envelope that folds the confirmed SAS into the AAD.
 - `src/api/`: the interfaces the closed app implements around this crypto.
+- `src/offload/`: the isolate seam. Large encodes and encrypts run on a worker isolate on native and inline on web; byte output is identical either way.
 
 Everything is stateless code over bytes: key material always enters as a parameter and leaves with the caller.
 

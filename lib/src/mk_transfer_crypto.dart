@@ -10,6 +10,7 @@ import 'p2p_crypto.dart';
 /// HKDF transcript over (responder_pub || requester_pub || transfer_id).
 /// User matches the same 3-digit number on both screens to authorize.
 class SasChallenge {
+  /// Creates a challenge; see [MkTransferCrypto.computeSasOptions].
   const SasChallenge({
     required this.realSas,
     required this.options,
@@ -40,15 +41,18 @@ class MkTransferCrypto {
   static final AesGcm _aesGcm = AesGcm.with256bits();
   static final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
 
-  // Both devices independently derive the same 5-option challenge from
-  // the ECDH transcript. A MITM substituting either side's ephemeral
-  // pubkey would produce different option sets on each side — user
-  // refuses on visual mismatch. As defense-in-depth the chosen SAS
-  // value is folded into the MK-encryption AAD, so even an accidental
-  // "lucky tap" collision can't unlock the MK.
-  /// Pure helper. Returns a [SasChallenge] with `transferId` populated so
-  /// downstream UI / state notifiers can disambiguate concurrent transfers
-  /// without tracking it out-of-band.
+  /// Derive the 5-option SAS challenge for a transfer.
+  ///
+  /// Both devices independently derive the same challenge from the ECDH
+  /// transcript. A machine in the middle substituting either side's
+  /// ephemeral pubkey would produce different option sets on each side,
+  /// and the user refuses on visual mismatch. As defense-in-depth the
+  /// chosen SAS value is folded into the MK-encryption AAD, so even an
+  /// accidental "lucky tap" collision can't unlock the MK.
+  ///
+  /// Returns a [SasChallenge] with `transferId` populated so downstream
+  /// UI / state notifiers can disambiguate concurrent transfers without
+  /// tracking it out-of-band.
   static Future<SasChallenge> computeSasOptions({
     required SimplePublicKey responderEphemeralPub,
     required SimplePublicKey requesterEphemeralPub,
@@ -98,9 +102,7 @@ class MkTransferCrypto {
     // are 1000 distinct candidate values and we need at most 5.
     var probe = (realInt + 1) % 1000;
     while (picked.length < 5) {
-      if (picked.add(probe)) {
-        // added
-      }
+      picked.add(probe);
       probe = (probe + 1) % 1000;
     }
     final list = picked.toList();

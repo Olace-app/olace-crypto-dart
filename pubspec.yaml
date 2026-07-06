@@ -1,10 +1,13 @@
 name: olace_crypto
 description: >-
   Client-side cryptography of Olace: zero-knowledge backup encryption,
-  PIN vault, recovery keys and the E2EE session core. Pure Dart, no
-  Flutter dependency. The Olace app imports this package verbatim.
-version: 0.1.0
+  PIN vault, recovery keys and the E2EE session core. Pure Dart.
+version: 0.1.1
 repository: https://github.com/Olace-app/olace-crypto-dart
+topics:
+  - cryptography
+  - encryption
+  - e2ee
 
 environment:
   sdk: ^3.4.0

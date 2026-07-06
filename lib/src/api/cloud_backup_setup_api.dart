@@ -1,6 +1,7 @@
 /// Shared result type — real service and subwindow proxy both return
 /// this. Has JSON helpers so it can cross the bridge intact.
 class PendingBackupSetupResumeResult {
+  /// Creates a result; all flags default to false.
   const PendingBackupSetupResumeResult({
     this.completed = false,
     this.shouldRetryLater = false,
@@ -9,6 +10,7 @@ class PendingBackupSetupResumeResult {
     this.errorMessage,
   });
 
+  /// The "nothing pending, nothing done" result.
   const PendingBackupSetupResumeResult.none()
       : completed = false,
         shouldRetryLater = false,
@@ -16,12 +18,23 @@ class PendingBackupSetupResumeResult {
         expiredOrCleared = false,
         errorMessage = null;
 
+  /// A pending enrollment was found and completed.
   final bool completed;
+
+  /// A transient failure occurred; the caller should retry later.
   final bool shouldRetryLater;
+
+  /// The pending record cannot complete without the user re-entering
+  /// credentials (Recovery Key or PIN).
   final bool needsRecovery;
+
+  /// The pending record expired server-side or was cleared; nothing to do.
   final bool expiredOrCleared;
+
+  /// Human-readable error, when any step failed.
   final String? errorMessage;
 
+  /// JSON form for crossing the window bridge.
   Map<String, Object?> toJson() => <String, Object?>{
         'completed': completed,
         'shouldRetryLater': shouldRetryLater,
@@ -30,6 +43,7 @@ class PendingBackupSetupResumeResult {
         'errorMessage': errorMessage,
       };
 
+  /// Inverse of [toJson].
   factory PendingBackupSetupResumeResult.fromJson(Map<String, dynamic> j) {
     return PendingBackupSetupResumeResult(
       completed: j['completed'] == true,
@@ -41,7 +55,7 @@ class PendingBackupSetupResumeResult {
   }
 }
 
-/// Interface for [CloudBackupSetupService] + subwindow proxy. Covers
+/// Interface for the app's backup setup service + subwindow proxy. Covers
 /// the two operations UI actually invokes: finalize (first-time
 /// enrollment, passes base64-encoded mk + recovery key bytes over
 /// the bridge — see note in [finalizeSetupB64]) and reconcile.
@@ -63,5 +77,6 @@ abstract class CloudBackupSetupApi {
     int mkVersion = 1,
   });
 
+  /// Resume an interrupted enrollment if a pending record exists.
   Future<PendingBackupSetupResumeResult> reconcilePendingSetupIfNeeded();
 }

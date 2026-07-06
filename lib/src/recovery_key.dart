@@ -10,7 +10,7 @@ class RecoveryKey {
 
   /// Encode 16 bytes as Crockford Base32 grouped with dashes.
   ///
-  /// Format: `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-XXX` (128 bits → 26 chars).
+  /// Format: `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-X` (128 bits → 26 chars).
   static String format(Uint8List bytes) {
     final encoded = _crockfordBase32Encode(bytes);
     final buf = StringBuffer();
@@ -23,7 +23,7 @@ class RecoveryKey {
 
   /// Parse a formatted Recovery Key back to bytes.
   ///
-  /// Strips dashes/spaces, normalises case, returns null on invalid input.
+  /// Strips dashes/spaces, normalizes case, returns null on invalid input.
   static Uint8List? parse(String formatted) {
     final cleaned = formatted
         .replaceAll(RegExp(r'[\s\-]'), '')

@@ -98,7 +98,10 @@ Future<String> _encodeP2PEnvelopeJson(Map<String, dynamic> envelope) {
   return Future<String>.value(jsonEncode(envelope));
 }
 
+/// A remote device's public identity: its static X25519 public key with
+/// the SHA-256 fingerprint and key version registered for the account.
 class P2PPeerIdentity {
+  /// Creates a peer identity from its registered public fields.
   const P2PPeerIdentity({
     required this.deviceId,
     required this.publicKey,
@@ -106,17 +109,28 @@ class P2PPeerIdentity {
     required this.keyVersion,
   });
 
+  /// Canonical device id (`didv1_...`).
   final String deviceId;
+
+  /// Static X25519 public key, base64.
   final String publicKey;
+
+  /// SHA-256 of the raw public key bytes, lowercase hex.
   final String fingerprint;
+
+  /// Server-assigned key version, bumped on identity rotation.
   final int keyVersion;
 
+  /// The public key as a `cryptography` X25519 [SimplePublicKey].
   SimplePublicKey toSimplePublicKey() {
     return SimplePublicKey(base64Decode(publicKey), type: KeyPairType.x25519);
   }
 }
 
+/// This device's identity: the peer fields plus the static X25519
+/// private key. The private key never leaves the device.
 class P2PLocalIdentity extends P2PPeerIdentity {
+  /// Creates a local identity including the private key.
   P2PLocalIdentity({
     required super.deviceId,
     required super.publicKey,
@@ -126,9 +140,13 @@ class P2PLocalIdentity extends P2PPeerIdentity {
     required this.createdAt,
   });
 
+  /// Static X25519 private key, base64. Never leaves the device.
   final String privateKey;
+
+  /// Creation time, epoch milliseconds.
   final int createdAt;
 
+  /// The full keypair as a `cryptography` X25519 [SimpleKeyPairData].
   SimpleKeyPairData toKeyPairData() {
     return SimpleKeyPairData(
       base64Decode(privateKey),
@@ -138,19 +156,34 @@ class P2PLocalIdentity extends P2PPeerIdentity {
   }
 }
 
+/// One session's AES-256-GCM state. Both peers hold the same session
+/// key and encrypt under it with independently random 96-bit nonces; the
+/// AAD `sessionId|seq|senderKeyVersion` pins every frame to its position
+/// and the receive counter rejects replays. Byte-compatible with the Go
+/// daemon's CryptoContext (olace-e2ee-go), enforced by shared vectors.
 class P2PCryptoContext {
+  /// Creates a session context. `sessionKey` must be the 32-byte key
+  /// both peers derived for `sessionId`.
   P2PCryptoContext({
     required this.sessionId,
     required this.sessionKey,
     required this.localKeyVersion,
   });
 
+  /// The session id both peers agreed on during the handshake.
   final String sessionId;
+
+  /// The shared 32-byte AES-256-GCM session key.
   final SecretKey sessionKey;
+
+  /// This device's identity key version, stamped into sent frames' AAD.
   final int localKeyVersion;
   int _sendSeq = 0;
   int _recvSeq = -1;
 
+  /// Encrypt [payload] into a wire envelope
+  /// `{type, v, session_id, seq, sender_key_version, nonce, ciphertext, tag}`.
+  /// Large payloads are encoded and sealed on a worker isolate.
   Future<Map<String, dynamic>> encrypt(Map<String, dynamic> payload) async {
     final seq = _sendSeq++;
     final roughChars = _roughP2PJsonStringChars(payload);
@@ -186,11 +219,16 @@ class P2PCryptoContext {
     };
   }
 
+  /// [encrypt] then JSON-encode the envelope (offloaded when large).
   Future<String> encryptToJson(Map<String, dynamic> payload) async {
     final envelope = await encrypt(payload);
     return _encodeP2PEnvelopeJson(envelope);
   }
 
+  /// Decrypt a wire envelope. Returns null on session mismatch, replayed
+  /// or missing sequence, malformed fields, or GCM authentication failure;
+  /// the caller drops the frame either way, so failures are not
+  /// distinguished.
   Future<Map<String, dynamic>?> decrypt(Map<String, dynamic> envelope) async {
     final session = (envelope['session_id'] as String? ?? '').trim();
     if (session != sessionId) return null;
@@ -224,6 +262,10 @@ class P2PCryptoContext {
   }
 }
 
+/// The E2EE session core for paired devices: X25519 key agreement,
+/// HKDF-SHA256 session keys, HMAC-SHA256 transcript signing, and the
+/// canonical handshake transcript builders. Byte-compatible mirror of
+/// the Go daemon side (olace-e2ee-go); the shared test vectors pin both.
 class P2PCrypto {
   P2PCrypto._();
 
@@ -231,6 +273,10 @@ class P2PCrypto {
   static final Hmac _hmacSha256 = Hmac.sha256();
   static final Random _random = Random.secure();
 
+  /// Canonical `hello` transcript for the LAN P2P handshake. Every field
+  /// both sides must agree on is pipe-joined in fixed order; the HMAC over
+  /// this string ([signHelloOrAck]) is what makes field substitution by a
+  /// relay or network attacker detectable.
   static String buildHelloTranscript({
     required String ticket,
     required String pairId,
@@ -258,6 +304,7 @@ class P2PCrypto {
     ].join('|');
   }
 
+  /// Canonical `ack` transcript for the LAN P2P handshake.
   static String buildAckTranscript({
     required String ticket,
     required String pairId,
@@ -289,6 +336,8 @@ class P2PCrypto {
     ].join('|');
   }
 
+  /// HKDF info string for the LAN P2P session key: binds the derived key
+  /// to the ticket, pair, user, both devices, both ephemerals and nonces.
   static String buildSessionInfo({
     required String ticket,
     required String pairId,
@@ -320,6 +369,11 @@ class P2PCrypto {
     ].join('|');
   }
 
+  /// Derive the LAN P2P session key: X25519 over BOTH the static
+  /// identity keys and the fresh ephemeral keys, concatenated
+  /// (static || ephemeral) into HKDF-SHA256 with salt
+  /// `olace-p2p-session-v1`. The static half authenticates the devices;
+  /// the ephemeral half freshens each session.
   static Future<P2PCryptoContext> deriveSessionContext({
     required String sessionId,
     required P2PLocalIdentity localIdentity,
@@ -353,6 +407,7 @@ class P2PCrypto {
     );
   }
 
+  /// HKDF info string for the legacy (v1, static-key) relay session.
   static String buildSecureRelaySessionInfo({
     required String pairId,
     required String userId,
@@ -374,6 +429,7 @@ class P2PCrypto {
     ].join('|');
   }
 
+  /// Canonical `hello` transcript for the forward-secret relay handshake.
   static String buildSecureRelayHelloTranscript({
     required String pairId,
     required String userId,
@@ -399,6 +455,7 @@ class P2PCrypto {
     ].join('|');
   }
 
+  /// Canonical `ack` transcript for the forward-secret relay handshake.
   static String buildSecureRelayAckTranscript({
     required String pairId,
     required String userId,
@@ -428,6 +485,7 @@ class P2PCrypto {
     ].join('|');
   }
 
+  /// HKDF info string for the forward-secret relay session key.
   static String buildSecureRelayForwardSecretSessionInfo({
     required String pairId,
     required String userId,
@@ -457,6 +515,10 @@ class P2PCrypto {
     ].join('|');
   }
 
+  /// Derive the legacy (v1) relay session key from the static identity
+  /// keys only, HKDF-SHA256 salt `olace-paired-e2ee-v1`. Superseded by
+  /// [deriveForwardSecretSessionContext] for new sessions; kept for
+  /// wire compatibility.
   static Future<P2PCryptoContext> deriveStaticSessionContext({
     required String sessionId,
     required P2PLocalIdentity localIdentity,
@@ -480,6 +542,11 @@ class P2PCrypto {
     );
   }
 
+  /// Derive the forward-secret relay session key: X25519 over ephemeral
+  /// keys ONLY, HKDF-SHA256 salt `olace-paired-e2ee-relay-fs-v2`. A later
+  /// compromise of a device's static identity key does not decrypt
+  /// recorded relay traffic. Authentication comes separately from the
+  /// transcript HMAC keyed by the static-static secret.
   static Future<P2PCryptoContext> deriveForwardSecretSessionContext({
     required String sessionId,
     required int localKeyVersion,
@@ -504,6 +571,9 @@ class P2PCrypto {
     );
   }
 
+  /// HMAC-SHA256 a handshake transcript with the auth key derived from
+  /// the static-static X25519 secret (HKDF salt `olace-p2p-auth-v1`, info
+  /// = the two device ids byte-sorted and pipe-joined). Returns base64.
   static Future<String> signHelloOrAck({
     required P2PLocalIdentity localIdentity,
     required P2PPeerIdentity peerIdentity,
@@ -528,6 +598,8 @@ class P2PCrypto {
     return base64Encode(mac.bytes);
   }
 
+  /// Verify a transcript signature from [signHelloOrAck] in constant
+  /// time.
   static Future<bool> verifyHelloOrAck({
     required P2PLocalIdentity localIdentity,
     required P2PPeerIdentity peerIdentity,
@@ -542,6 +614,7 @@ class P2PCrypto {
     return _timingSafeEquals(base64Decode(expected), base64Decode(signature));
   }
 
+  /// Generate a fresh X25519 keypair for a single handshake.
   static Future<SimpleKeyPairData> newEphemeralKeyPair() async {
     final pair = await _x25519.newKeyPair();
     final privateBytes = await pair.extractPrivateKeyBytes();
@@ -553,6 +626,8 @@ class P2PCrypto {
     );
   }
 
+  /// SHA-256 of the raw public key bytes, lowercase hex. The stable
+  /// identity fingerprint shown to users and registered server-side.
   static Future<String> fingerprintForPublicKey(String publicKey) async {
     final sha = Sha256();
     final digest = await sha.hash(base64Decode(publicKey));
@@ -568,6 +643,7 @@ class P2PCrypto {
     return out == 0;
   }
 
+  /// Cryptographically secure random bytes (`Random.secure()`).
   static Uint8List randomBytes(int length) {
     final out = Uint8List(length);
     for (var i = 0; i < length; i += 1) {
