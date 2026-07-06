@@ -1,0 +1,39 @@
+{
+  "comment": "ZK backup + PIN vault vectors for olace-crypto-dart. Deterministic inputs; ciphertexts carry random nonces and are verified decrypt-direction.",
+  "inputs": {
+    "mk_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "rk_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "user_id": "user-0001",
+    "conversation_id": "conv-0001",
+    "project_id": "proj-0001",
+    "attachment_id": "att-0001",
+    "pin": "4821",
+    "pin_salt_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+    "hardened_hex": "7777777777777777777777777777777777777777777777777777777777777777",
+    "argon2": {
+      "t": 1,
+      "m": 1024,
+      "p": 1
+    }
+  },
+  "deterministic": {
+    "pin_key_hex": "26c65b9b1058666792ac72786ac9a9fc31701cf58e197c04611645ac928761c1",
+    "harden_blind_hex": "001b0e3ee35c68204001051450533e365a4732cc5e53e65beda8bf56a3c941ea",
+    "vault_key_hex": "89edcc41a965f07d270a25d2d3664379513b72c5cad5848b2a6ef5d61e0c06a8",
+    "auth_tag_hex": "849c0d870f267323e14c9702c87e93f112f6eea2a855f31a1a721ea4bc3a8765",
+    "auth_tag_sha256_hex": "d18c411b47a75c02918df197707118296f8e591d1892d2b8c8a3f1456bc7bc9e",
+    "recovery_key_formatted": "M2GT5-8X4MP-KAFA5-9NANT-SBDEN-W",
+    "static_relay_v1_key_hex": "3a89a04bedbcd814433ddd556fdb4badcae9004f4c1e86bb60743eec2a3c3149"
+  },
+  "decrypt_vectors": {
+    "wrapped_mk_b64": "BeFeDPMqpTkhkoxF6l1C7ynjJPCguEvEnHMuNxgEw2uZEEGLlLxA2ORr4yDjcFseT1a1XGCHnOck9wco",
+    "conversation_zk1": "zk1:Cae3Zb-sNfZFgiGHndzRYFGi5rlCZceEy4YeqeHWfxthpxEtc-Y3BI-jtgdDxi7iRxoC_dQwvxqI5hY9wZ4kOtGbGMm8hUMKFjNu9pya_w5Ucw==",
+    "project_zk1": "zk1:T2Yuf5Cbld6MqTITwMBBVQ3QV3-YkBzU2vyL7Lmt66CWpDOUaYEfTev5gYr_UwnsljbJexY=",
+    "research_context_zk1": "zk1:Jv9MvCXw0siZIdrhKZHR6SvFRrd1gAbV_lsEqo2N6A4t-BTcW5BctrXLlCupWu0GD6Bu_cg8ocvl",
+    "instructions_zk1": "zk1:smxCtFW4PptuCp8_l6L57LD7CMlaUOYIOXFmIHK6eKNnYUg9eisCf4UVOgtdJlB0jp7E2UCf",
+    "byok_vault_zk1": "zk1:3dxndO-ZpJfCfChBxLT1QxBy66fa0O6ACMnj4-E103NxLcQadDPwIPK72Ngev8U3Qc2lWabrfDALYE7UPeMtbRP6HbpMF9ugANgFULGHwat0RBOXBKSYWDty25vhhWXgEpZ5iaNo0CavzSugNzbjlNPKNHPBlGMdK37hbAs=",
+    "media_blob_b64": "zvy8SjelXI2CfXAmbuCr/4/+bRApPuwNMrYPpfd0kHwC7qMPYpGfkkqTl5JJATcMNhZSwry8JsBU2z/+UJzYRUZbdJkRghgv88qGoCJWPU38zwSCoFGvFJFa8cc=",
+    "attachment_meta_b64": "Q09nE4x3Il5mc3JUZLY_w91y_dqYF-UykOV_OhWNyPz5Ztbx4nis",
+    "vault_encrypted_rk_b64": "oQ-6krV94oSKY7NF-uZJOxORLNSApk0gpf6fi5TPpmds3XfDsYaXf0pTyCs="
+  }
+}
