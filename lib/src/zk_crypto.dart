@@ -3,8 +3,100 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 
+import 'offload/offload.dart';
 import 'p2p_crypto.dart';
 import 'recovery_key.dart';
+
+/// Payloads/ciphertexts at or above this size run their derive + AES-GCM on a
+/// worker isolate (finding #14 stage 1). 64 KiB matches
+/// `_conversationMessagesEncodeOffloadBytes` in conversation_service.dart; the
+/// P2P envelope path uses 96 KiB — either is fine, this reuses the conversation
+/// threshold. On web `offloadCompute` runs inline (no isolates), so the gate is
+/// a native-only jank fix; output is byte-identical to the inline path.
+const int _zkOffloadBytes = 64 * 1024;
+
+// ── Offload workers (finding #14 stage 1) ───────────────────────────
+// Top-level so Isolate.run can send them with no closure capture, mirroring
+// P2PCrypto._encryptP2PEnvelopeWorker. HKDF/AesGcm re-initialise in the worker
+// isolate; the MK bytes are passed in-memory (same process — no persistence,
+// no network), exactly as the P2P path passes session-key bytes. Byte output
+// is identical to the inline methods below.
+
+Future<String> _zkEncryptWithMkWorker(Map<String, dynamic> args) async {
+  final mk = args['mk'] as Uint8List;
+  final plaintext = args['plaintext'] as Uint8List;
+  final purpose = args['purpose'] as String;
+  final aad = args['aad'] as String;
+  final dataKey = await ZkCrypto.deriveDataKey(mk, purpose);
+  final nonce = P2PCrypto.randomBytes(12);
+  final box = await AesGcm.with256bits().encrypt(
+    plaintext,
+    secretKey: dataKey,
+    nonce: nonce,
+    aad: utf8.encode(aad),
+  );
+  final combined = Uint8List.fromList([
+    ...nonce,
+    ...box.cipherText,
+    ...box.mac.bytes,
+  ]);
+  return 'zk1:${base64Url.encode(combined)}';
+}
+
+Future<Uint8List> _zkDecryptWithMkWorker(Map<String, dynamic> args) async {
+  final mk = args['mk'] as Uint8List;
+  final token = args['token'] as String;
+  final purpose = args['purpose'] as String;
+  final aad = args['aad'] as String;
+  final b64 = token.substring(4); // caller validated the 'zk1:' prefix
+  final combined = base64Url.decode(b64);
+  if (combined.length < 28) {
+    throw const FormatException('Invalid ZK ciphertext length');
+  }
+  final nonce = combined.sublist(0, 12);
+  final cipherText = combined.sublist(12, combined.length - 16);
+  final tag = combined.sublist(combined.length - 16);
+  final dataKey = await ZkCrypto.deriveDataKey(mk, purpose);
+  final cleartext = await AesGcm.with256bits().decrypt(
+    SecretBox(cipherText, nonce: nonce, mac: Mac(tag)),
+    secretKey: dataKey,
+    aad: utf8.encode(aad),
+  );
+  return Uint8List.fromList(cleartext);
+}
+
+Future<Uint8List> _zkEncryptMediaBlobWorker(Map<String, dynamic> args) async {
+  final mk = args['mk'] as Uint8List;
+  final cleartext = args['cleartext'] as Uint8List;
+  final purpose = args['purpose'] as String;
+  final aad = args['aad'] as String;
+  final dataKey = await ZkCrypto.deriveDataKey(mk, purpose);
+  final nonce = P2PCrypto.randomBytes(12);
+  final box = await AesGcm.with256bits().encrypt(
+    cleartext,
+    secretKey: dataKey,
+    nonce: nonce,
+    aad: utf8.encode(aad),
+  );
+  return Uint8List.fromList([...nonce, ...box.cipherText, ...box.mac.bytes]);
+}
+
+Future<Uint8List> _zkDecryptMediaBlobWorker(Map<String, dynamic> args) async {
+  final mk = args['mk'] as Uint8List;
+  final encrypted = args['encrypted'] as Uint8List;
+  final purpose = args['purpose'] as String;
+  final aad = args['aad'] as String;
+  final nonce = encrypted.sublist(0, 12);
+  final cipherText = encrypted.sublist(12, encrypted.length - 16);
+  final tag = encrypted.sublist(encrypted.length - 16);
+  final dataKey = await ZkCrypto.deriveDataKey(mk, purpose);
+  final cleartext = await AesGcm.with256bits().decrypt(
+    SecretBox(cipherText, nonce: nonce, mac: Mac(tag)),
+    secretKey: dataKey,
+    aad: utf8.encode(aad),
+  );
+  return Uint8List.fromList(cleartext);
+}
 
 /// Stateless zero-knowledge encryption core.
 ///
@@ -247,6 +339,14 @@ class ZkCrypto {
   }) async {
     final purpose = 'media|$userId|$attachmentId';
     final aad = purpose;
+    if (cleartext.length >= _zkOffloadBytes) {
+      return offloadCompute(_zkEncryptMediaBlobWorker, {
+        'mk': mk,
+        'cleartext': cleartext,
+        'purpose': purpose,
+        'aad': aad,
+      });
+    }
     final dataKey = await deriveDataKey(mk, purpose);
     final nonce = P2PCrypto.randomBytes(12);
     final box = await _aesGcm.encrypt(
@@ -267,10 +367,18 @@ class ZkCrypto {
   }) async {
     final purpose = 'media|$userId|$attachmentId';
     final aad = purpose;
-    final dataKey = await deriveDataKey(mk, purpose);
     if (encrypted.length < 28) {
       throw const FormatException('Invalid encrypted media length');
     }
+    if (encrypted.length >= _zkOffloadBytes) {
+      return offloadCompute(_zkDecryptMediaBlobWorker, {
+        'mk': mk,
+        'encrypted': encrypted,
+        'purpose': purpose,
+        'aad': aad,
+      });
+    }
+    final dataKey = await deriveDataKey(mk, purpose);
     final nonce = encrypted.sublist(0, 12);
     final cipherText = encrypted.sublist(12, encrypted.length - 16);
     final tag = encrypted.sublist(encrypted.length - 16);
@@ -350,6 +458,15 @@ class ZkCrypto {
     String purpose,
     String aad,
   ) async {
+    if (plaintext.length >= _zkOffloadBytes) {
+      return offloadCompute(_zkEncryptWithMkWorker, {
+        'mk': mk,
+        'plaintext':
+            plaintext is Uint8List ? plaintext : Uint8List.fromList(plaintext),
+        'purpose': purpose,
+        'aad': aad,
+      });
+    }
     final dataKey = await deriveDataKey(mk, purpose);
     final nonce = P2PCrypto.randomBytes(12);
     final box = await _aesGcm.encrypt(
@@ -376,6 +493,14 @@ class ZkCrypto {
     if (!token.startsWith('zk1:')) {
       throw const FormatException(
           'Not a ZK-encrypted payload (missing zk1: prefix)');
+    }
+    if (token.length >= _zkOffloadBytes) {
+      return offloadCompute(_zkDecryptWithMkWorker, {
+        'mk': mk,
+        'token': token,
+        'purpose': purpose,
+        'aad': aad,
+      });
     }
     final b64 = token.substring(4);
     final combined = base64Url.decode(b64);
