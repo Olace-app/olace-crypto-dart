@@ -22,6 +22,25 @@ const int _zkOffloadBytes = 64 * 1024;
 // no network), exactly as the P2P path passes session-key bytes. Byte output
 // is identical to the inline methods below.
 
+/// Pack `nonce || ciphertext || tag` without the `[...a, ...b, ...c]`
+/// spread — on dart2js a spread over a multi-MB ciphertext builds a boxed
+/// JSArray element-by-element before copying, two extra O(n) passes on the
+/// main thread.
+Uint8List _packEnvelope(
+  List<int> nonce,
+  List<int> cipherText,
+  List<int> mac,
+) {
+  final out = Uint8List(nonce.length + cipherText.length + mac.length);
+  out.setRange(0, nonce.length, nonce);
+  out.setRange(nonce.length, nonce.length + cipherText.length, cipherText);
+  out.setRange(nonce.length + cipherText.length, out.length, mac);
+  return out;
+}
+
+Uint8List _asUint8List(List<int> bytes) =>
+    bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+
 Future<String> _zkEncryptWithMkWorker(Map<String, dynamic> args) async {
   final mk = args['mk'] as Uint8List;
   final plaintext = args['plaintext'] as Uint8List;
@@ -35,11 +54,7 @@ Future<String> _zkEncryptWithMkWorker(Map<String, dynamic> args) async {
     nonce: nonce,
     aad: utf8.encode(aad),
   );
-  final combined = Uint8List.fromList([
-    ...nonce,
-    ...box.cipherText,
-    ...box.mac.bytes,
-  ]);
+  final combined = _packEnvelope(nonce, box.cipherText, box.mac.bytes);
   return 'zk1:${base64Url.encode(combined)}';
 }
 
@@ -62,7 +77,7 @@ Future<Uint8List> _zkDecryptWithMkWorker(Map<String, dynamic> args) async {
     secretKey: dataKey,
     aad: utf8.encode(aad),
   );
-  return Uint8List.fromList(cleartext);
+  return _asUint8List(cleartext);
 }
 
 Future<Uint8List> _zkEncryptMediaBlobWorker(Map<String, dynamic> args) async {
@@ -78,7 +93,7 @@ Future<Uint8List> _zkEncryptMediaBlobWorker(Map<String, dynamic> args) async {
     nonce: nonce,
     aad: utf8.encode(aad),
   );
-  return Uint8List.fromList([...nonce, ...box.cipherText, ...box.mac.bytes]);
+  return _packEnvelope(nonce, box.cipherText, box.mac.bytes);
 }
 
 Future<Uint8List> _zkDecryptMediaBlobWorker(Map<String, dynamic> args) async {
@@ -95,7 +110,7 @@ Future<Uint8List> _zkDecryptMediaBlobWorker(Map<String, dynamic> args) async {
     secretKey: dataKey,
     aad: utf8.encode(aad),
   );
-  return Uint8List.fromList(cleartext);
+  return _asUint8List(cleartext);
 }
 
 /// Stateless zero-knowledge encryption core.
@@ -148,11 +163,7 @@ class ZkCrypto {
       aad: aad,
     );
     // nonce(12) + ciphertext + mac(16)
-    final combined = Uint8List.fromList([
-      ...nonce,
-      ...box.cipherText,
-      ...box.mac.bytes,
-    ]);
+    final combined = _packEnvelope(nonce, box.cipherText, box.mac.bytes);
     return base64Url.encode(combined);
   }
 
@@ -178,7 +189,7 @@ class ZkCrypto {
       secretKey: wrappingKey,
       aad: aad,
     );
-    return Uint8List.fromList(cleartext);
+    return _asUint8List(cleartext);
   }
 
   static Future<SecretKey> _deriveWrappingKey(
@@ -355,7 +366,7 @@ class ZkCrypto {
       nonce: nonce,
       aad: utf8.encode(aad),
     );
-    return Uint8List.fromList([...nonce, ...box.cipherText, ...box.mac.bytes]);
+    return _packEnvelope(nonce, box.cipherText, box.mac.bytes);
   }
 
   /// Decrypt a media blob.
@@ -387,7 +398,7 @@ class ZkCrypto {
       secretKey: dataKey,
       aad: utf8.encode(aad),
     );
-    return Uint8List.fromList(cleartext);
+    return _asUint8List(cleartext);
   }
 
   /// Encrypt a short metadata string (e.g. file_name, mime_type) tied to a
@@ -412,11 +423,7 @@ class ZkCrypto {
       nonce: nonce,
       aad: utf8.encode(aad),
     );
-    final combined = Uint8List.fromList([
-      ...nonce,
-      ...box.cipherText,
-      ...box.mac.bytes,
-    ]);
+    final combined = _packEnvelope(nonce, box.cipherText, box.mac.bytes);
     return base64Url.encode(combined);
   }
 
@@ -475,11 +482,7 @@ class ZkCrypto {
       nonce: nonce,
       aad: utf8.encode(aad),
     );
-    final combined = Uint8List.fromList([
-      ...nonce,
-      ...box.cipherText,
-      ...box.mac.bytes,
-    ]);
+    final combined = _packEnvelope(nonce, box.cipherText, box.mac.bytes);
     return 'zk1:${base64Url.encode(combined)}';
   }
 
@@ -516,7 +519,7 @@ class ZkCrypto {
       secretKey: dataKey,
       aad: utf8.encode(aad),
     );
-    return Uint8List.fromList(cleartext);
+    return _asUint8List(cleartext);
   }
 
   /// Per-purpose data key: HKDF-SHA256 over the MK with salt
