@@ -533,4 +533,57 @@ class ZkCrypto {
       info: utf8.encode(purpose),
     );
   }
+
+  // ── MK possession proof ─────────────────────────────────────────────
+  //
+  // The account's MK-derived identity keypair: an Ed25519 seed HKDF'd from
+  // the MK (salt `olace-mk-proof-v1`, info = userId), so any device holding
+  // the MK derives the SAME keypair deterministically and the public key
+  // can be registered server-side as a possession verifier. The server can
+  // only verify signatures, never the derivation, which is why step-up
+  // additionally age-gates a registered key.
+
+  static final Ed25519 _ed25519 = Ed25519();
+
+  static String _b64urlNoPad(List<int> raw) =>
+      base64Url.encode(raw).replaceAll('=', '');
+
+  /// The account's deterministic MK-derived Ed25519 keypair (see the
+  /// section comment above for the derivation and why it exists).
+  static Future<SimpleKeyPair> deriveMkProofKeyPair(
+    Uint8List mk,
+    String userId,
+  ) async {
+    final seedKey = await _hkdf.deriveKey(
+      secretKey: SecretKey(mk),
+      nonce: utf8.encode('olace-mk-proof-v1'),
+      info: utf8.encode(userId),
+    );
+    final seed = await seedKey.extractBytes();
+    return _ed25519.newKeyPairFromSeed(seed);
+  }
+
+  /// b64url (unpadded) raw 32-byte Ed25519 public key, the value registered
+  /// via POST /sync/encryption/mk-proof/register.
+  static Future<String> mkProofPublicKeyB64(Uint8List mk, String userId) async {
+    final keyPair = await deriveMkProofKeyPair(mk, userId);
+    final publicKey = await keyPair.extractPublicKey();
+    return _b64urlNoPad(publicKey.bytes);
+  }
+
+  /// Signature over the canonical challenge message, b64url unpadded.
+  /// The message shape is byte-identical to the backend verifier
+  /// (`mk_proof_message` in phone_auth_flow_recovery.py):
+  /// `olace-mk-proof-v1|{userId}|{purpose}|{nonce}`.
+  static Future<String> signMkProofChallenge({
+    required Uint8List mk,
+    required String userId,
+    required String purpose,
+    required String nonce,
+  }) async {
+    final keyPair = await deriveMkProofKeyPair(mk, userId);
+    final message = utf8.encode('olace-mk-proof-v1|$userId|$purpose|$nonce');
+    final signature = await _ed25519.sign(message, keyPair: keyPair);
+    return _b64urlNoPad(signature.bytes);
+  }
 }

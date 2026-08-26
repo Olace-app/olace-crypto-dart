@@ -100,4 +100,21 @@ abstract class ZkCryptoApi {
 
   /// Clear the locally stored MK (sign-out / account deletion).
   Future<void> clearMk();
+
+  /// Sign an MK possession-proof challenge (email-change step-up): the
+  /// leader derives the account's MK-derived Ed25519 keypair and signs the
+  /// canonical message for [purpose] + [nonce]. Returns the b64url
+  /// signature. Raw MK bytes never cross the bridge. Throws
+  /// [MkLockedException] when no unwrapped MK is available (locked web
+  /// session).
+  Future<String> signMkProofChallenge({
+    required String userId,
+    required String purpose,
+    required String nonce,
+  });
+
+  /// The b64url raw Ed25519 public key derived from the MK for [userId] —
+  /// the value registered as the server-side possession verifier. Throws
+  /// [MkLockedException] when no unwrapped MK is available.
+  Future<String> mkProofPublicKey({required String userId});
 }
