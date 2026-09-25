@@ -1,6 +1,6 @@
 // Zero-knowledge backup + PIN vault vector tests.
 //
-// test/vectors/zk_vectors.json pins the zk1 envelope format, MK wrap, the
+// test/vectors/zk_vectors.json pins the zk1 and zk2 envelope formats, MK wrap, the
 // per-purpose HKDF derivations, the PIN-vault 3-stage derivation, and the
 // Crockford recovery-key format. These bytes are what shipped Olace
 // clients have already written to user backups: a failure here means
@@ -120,6 +120,37 @@ void main() {
           userId: userId, conversationId: 'conv-other'),
       throwsA(anything),
     );
+  });
+
+  test('zk2 (compressed) payload decrypt vectors', () async {
+    final expected = inputs['zk2_payload'] as Map<String, dynamic>;
+    expect(
+      await ZkCrypto.decryptConversation(mk, dv['conversation_zk2'] as String,
+          userId: userId, conversationId: conversationId),
+      expected,
+    );
+    expect(
+      await ZkCrypto.decryptProject(mk, dv['project_zk2'] as String,
+          userId: userId, projectId: projectId),
+      expected,
+    );
+    expect(
+      await ZkCrypto.decryptResearchContext(
+          mk, dv['research_context_zk2'] as String,
+          userId: userId, conversationId: conversationId),
+      expected,
+    );
+    // The format tag is bound into the AAD: relabelling a zk2 body as zk1
+    // (or the reverse) must fail authentication, never parse.
+    final zk2 = dv['conversation_zk2'] as String;
+    final zk1 = dv['conversation_zk1'] as String;
+    for (final forged in ['zk1:${zk2.substring(4)}', 'zk2:${zk1.substring(4)}']) {
+      await expectLater(
+        ZkCrypto.decryptConversation(mk, forged,
+            userId: userId, conversationId: conversationId),
+        throwsA(anything),
+      );
+    }
   });
 
   test('media blob + attachment metadata decrypt vectors', () async {
