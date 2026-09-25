@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 
+import 'compress/deflate.dart';
 import 'offload/offload.dart';
 import 'p2p_crypto.dart';
 import 'recovery_key.dart';
@@ -14,6 +15,136 @@ import 'recovery_key.dart';
 /// threshold. On web `offloadCompute` runs inline (no isolates), so the gate is
 /// a native-only jank fix; output is byte-identical to the inline path.
 const int _zkOffloadBytes = 64 * 1024;
+
+/// `zk1:` carries `nonce || AES-GCM(plaintext) || tag`. `zk2:` is the same
+/// envelope over raw-DEFLATE-compressed plaintext, with `|zk2` appended to
+/// the AAD so a prefix swapped between the two fails authentication rather
+/// than handing compressed bytes to a JSON parser. Same data key.
+const String _zk1Prefix = 'zk1:';
+const String _zk2Prefix = 'zk2:';
+const String _zk2AadSuffix = '|zk2';
+
+/// Rough size of a JSON-able value's string content, counted only up to
+/// [limit]. Decides whether encode + encrypt is worth a worker isolate
+/// without paying for a full encode first.
+int _estimateJsonSize(Object? value, int limit) {
+  var total = 0;
+  void walk(Object? v) {
+    if (total >= limit) return;
+    if (v is String) {
+      total += v.length + 2;
+    } else if (v is Map) {
+      for (final entry in v.entries) {
+        if (total >= limit) return;
+        total += '${entry.key}'.length + 4;
+        walk(entry.value);
+      }
+    } else if (v is List) {
+      for (final item in v) {
+        if (total >= limit) return;
+        walk(item);
+        total += 1;
+      }
+    } else {
+      total += 8;
+    }
+  }
+
+  walk(value);
+  return total;
+}
+
+Future<String> _sealEnvelope(
+  Uint8List mk,
+  List<int> body,
+  String purpose,
+  String aad,
+  String prefix,
+) async {
+  final dataKey = await ZkCrypto.deriveDataKey(mk, purpose);
+  final nonce = P2PCrypto.randomBytes(12);
+  final box = await AesGcm.with256bits().encrypt(
+    body,
+    secretKey: dataKey,
+    nonce: nonce,
+    aad: utf8.encode(aad),
+  );
+  final combined = _packEnvelope(nonce, box.cipherText, box.mac.bytes);
+  return '$prefix${base64Url.encode(combined)}';
+}
+
+/// Opens a `zk1` or `zk2` envelope and returns the plaintext bytes
+/// (inflated for `zk2`). Throws on format or tag failure.
+Future<Uint8List> _openEnvelope(
+  Uint8List mk,
+  String token,
+  String purpose,
+  String aad,
+) async {
+  final compressed = token.startsWith(_zk2Prefix);
+  if (!compressed && !token.startsWith(_zk1Prefix)) {
+    throw const FormatException(
+        'Not a ZK-encrypted payload (missing zk1:/zk2: prefix)');
+  }
+  final combined = base64Url.decode(token.substring(4));
+  if (combined.length < 28) {
+    throw const FormatException('Invalid ZK ciphertext length');
+  }
+  final nonce = combined.sublist(0, 12);
+  final cipherText = combined.sublist(12, combined.length - 16);
+  final tag = combined.sublist(combined.length - 16);
+  final dataKey = await ZkCrypto.deriveDataKey(mk, purpose);
+  final cleartext = await AesGcm.with256bits().decrypt(
+    SecretBox(cipherText, nonce: nonce, mac: Mac(tag)),
+    secretKey: dataKey,
+    aad: utf8.encode(compressed ? '$aad$_zk2AadSuffix' : aad),
+  );
+  return compressed ? inflateRaw(cleartext) : _asUint8List(cleartext);
+}
+
+Future<({String token, int plaintextBytes})> _encryptJsonInline(
+  Uint8List mk,
+  Map<String, dynamic> payload,
+  String purpose,
+  String aad,
+  bool compress,
+) async {
+  final plaintext = utf8.encode(jsonEncode(payload));
+  final token = compress
+      ? await _sealEnvelope(
+          mk, deflateRaw(plaintext), purpose, '$aad$_zk2AadSuffix', _zk2Prefix)
+      : await _sealEnvelope(mk, plaintext, purpose, aad, _zk1Prefix);
+  return (token: token, plaintextBytes: plaintext.length);
+}
+
+Future<Map<String, dynamic>> _decryptJsonInline(
+  Uint8List mk,
+  String token,
+  String purpose,
+  String aad,
+) async {
+  final cleartext = await _openEnvelope(mk, token, purpose, aad);
+  return jsonDecode(utf8.decode(cleartext)) as Map<String, dynamic>;
+}
+
+Future<({String token, int plaintextBytes})> _encryptJsonWorker(
+  Map<String, dynamic> args,
+) =>
+    _encryptJsonInline(
+      args['mk'] as Uint8List,
+      args['payload'] as Map<String, dynamic>,
+      args['purpose'] as String,
+      args['aad'] as String,
+      args['compress'] as bool,
+    );
+
+Future<Map<String, dynamic>> _decryptJsonWorker(Map<String, dynamic> args) =>
+    _decryptJsonInline(
+      args['mk'] as Uint8List,
+      args['token'] as String,
+      args['purpose'] as String,
+      args['aad'] as String,
+    );
 
 // ── Offload workers (finding #14 stage 1) ───────────────────────────
 // Top-level so Isolate.run can send them with no closure capture, mirroring
@@ -58,27 +189,13 @@ Future<String> _zkEncryptWithMkWorker(Map<String, dynamic> args) async {
   return 'zk1:${base64Url.encode(combined)}';
 }
 
-Future<Uint8List> _zkDecryptWithMkWorker(Map<String, dynamic> args) async {
-  final mk = args['mk'] as Uint8List;
-  final token = args['token'] as String;
-  final purpose = args['purpose'] as String;
-  final aad = args['aad'] as String;
-  final b64 = token.substring(4); // caller validated the 'zk1:' prefix
-  final combined = base64Url.decode(b64);
-  if (combined.length < 28) {
-    throw const FormatException('Invalid ZK ciphertext length');
-  }
-  final nonce = combined.sublist(0, 12);
-  final cipherText = combined.sublist(12, combined.length - 16);
-  final tag = combined.sublist(combined.length - 16);
-  final dataKey = await ZkCrypto.deriveDataKey(mk, purpose);
-  final cleartext = await AesGcm.with256bits().decrypt(
-    SecretBox(cipherText, nonce: nonce, mac: Mac(tag)),
-    secretKey: dataKey,
-    aad: utf8.encode(aad),
-  );
-  return _asUint8List(cleartext);
-}
+Future<Uint8List> _zkDecryptWithMkWorker(Map<String, dynamic> args) =>
+    _openEnvelope(
+      args['mk'] as Uint8List,
+      args['token'] as String,
+      args['purpose'] as String,
+      args['aad'] as String,
+    );
 
 Future<Uint8List> _zkEncryptMediaBlobWorker(Map<String, dynamic> args) async {
   final mk = args['mk'] as Uint8List;
@@ -207,58 +324,75 @@ class ZkCrypto {
 
   /// Encrypt a conversation payload.
   ///
-  /// Returns `"zk1:" + base64url(nonce + ciphertext + tag)`.
+  /// Returns `"zk1:" + base64url(nonce + ciphertext + tag)`, or the `zk2:`
+  /// compressed envelope when [compress] is set.
   static Future<String> encryptConversation(
     Uint8List mk,
     Map<String, dynamic> payload, {
     required String userId,
     required String conversationId,
-  }) async {
+    bool compress = false,
+  }) async =>
+      (await encryptConversationSized(
+        mk,
+        payload,
+        userId: userId,
+        conversationId: conversationId,
+        compress: compress,
+      ))
+          .token;
+
+  /// [encryptConversation], also returning the UTF-8 JSON plaintext length
+  /// so a caller that reports the size does not encode the payload twice.
+  static Future<({String token, int plaintextBytes})> encryptConversationSized(
+    Uint8List mk,
+    Map<String, dynamic> payload, {
+    required String userId,
+    required String conversationId,
+    bool compress = false,
+  }) {
     final purpose = 'conv|$userId|$conversationId';
-    final aad = purpose;
-    final plaintext = utf8.encode(jsonEncode(payload));
-    return encryptWithMk(mk, plaintext, purpose, aad);
+    return encryptJson(mk, payload,
+        purpose: purpose, aad: purpose, compress: compress);
   }
 
-  /// Decrypt a conversation payload.
+  /// Decrypt a conversation payload (`zk1` or `zk2`).
   static Future<Map<String, dynamic>> decryptConversation(
     Uint8List mk,
     String ciphertext, {
     required String userId,
     required String conversationId,
-  }) async {
+  }) {
     final purpose = 'conv|$userId|$conversationId';
-    final aad = purpose;
-    final cleartext = await decryptWithMk(mk, ciphertext, purpose, aad);
-    return jsonDecode(utf8.decode(cleartext)) as Map<String, dynamic>;
+    return decryptJson(mk, ciphertext, purpose: purpose, aad: purpose);
   }
 
   /// Encrypt a project payload.
   ///
-  /// Returns `"zk1:" + base64url(nonce + ciphertext + tag)`.
+  /// Returns `"zk1:" + base64url(nonce + ciphertext + tag)`, or the `zk2:`
+  /// compressed envelope when [compress] is set.
   static Future<String> encryptProject(
     Uint8List mk,
     Map<String, dynamic> payload, {
     required String userId,
     required String projectId,
+    bool compress = false,
   }) async {
     final purpose = 'proj|$userId|$projectId';
-    final aad = purpose;
-    final plaintext = utf8.encode(jsonEncode(payload));
-    return encryptWithMk(mk, plaintext, purpose, aad);
+    return (await encryptJson(mk, payload,
+            purpose: purpose, aad: purpose, compress: compress))
+        .token;
   }
 
-  /// Decrypt a project payload.
+  /// Decrypt a project payload (`zk1` or `zk2`).
   static Future<Map<String, dynamic>> decryptProject(
     Uint8List mk,
     String ciphertext, {
     required String userId,
     required String projectId,
-  }) async {
+  }) {
     final purpose = 'proj|$userId|$projectId';
-    final aad = purpose;
-    final cleartext = await decryptWithMk(mk, ciphertext, purpose, aad);
-    return jsonDecode(utf8.decode(cleartext)) as Map<String, dynamic>;
+    return decryptJson(mk, ciphertext, purpose: purpose, aad: purpose);
   }
 
   /// Encrypt research context payload (conversation-scoped).
@@ -267,24 +401,65 @@ class ZkCrypto {
     Map<String, dynamic> payload, {
     required String userId,
     required String conversationId,
+    bool compress = false,
   }) async {
     final purpose = 'rctx|$userId|$conversationId';
-    final aad = purpose;
-    final plaintext = utf8.encode(jsonEncode(payload));
-    return encryptWithMk(mk, plaintext, purpose, aad);
+    return (await encryptJson(mk, payload,
+            purpose: purpose, aad: purpose, compress: compress))
+        .token;
   }
 
-  /// Decrypt research context payload.
+  /// Decrypt research context payload (`zk1` or `zk2`).
   static Future<Map<String, dynamic>> decryptResearchContext(
     Uint8List mk,
     String ciphertext, {
     required String userId,
     required String conversationId,
-  }) async {
+  }) {
     final purpose = 'rctx|$userId|$conversationId';
-    final aad = purpose;
-    final cleartext = await decryptWithMk(mk, ciphertext, purpose, aad);
-    return jsonDecode(utf8.decode(cleartext)) as Map<String, dynamic>;
+    return decryptJson(mk, ciphertext, purpose: purpose, aad: purpose);
+  }
+
+  /// Encrypt a JSON payload into a `zk1` envelope, or with [compress] a
+  /// `zk2` one (raw DEFLATE before AES-GCM). JSON encode, compression and
+  /// encryption run together on a worker isolate once the payload is large
+  /// enough to stall the caller; the bytes are identical either way.
+  static Future<({String token, int plaintextBytes})> encryptJson(
+    Uint8List mk,
+    Map<String, dynamic> payload, {
+    required String purpose,
+    required String aad,
+    bool compress = false,
+  }) {
+    if (_estimateJsonSize(payload, _zkOffloadBytes) >= _zkOffloadBytes) {
+      return offloadCompute(_encryptJsonWorker, {
+        'mk': mk,
+        'payload': payload,
+        'purpose': purpose,
+        'aad': aad,
+        'compress': compress,
+      });
+    }
+    return _encryptJsonInline(mk, payload, purpose, aad, compress);
+  }
+
+  /// Decrypt a `zk1` or `zk2` envelope and parse its JSON. Large tokens are
+  /// decrypted, inflated and parsed on a worker isolate.
+  static Future<Map<String, dynamic>> decryptJson(
+    Uint8List mk,
+    String token, {
+    required String purpose,
+    required String aad,
+  }) {
+    if (token.length >= _zkOffloadBytes) {
+      return offloadCompute(_decryptJsonWorker, {
+        'mk': mk,
+        'token': token,
+        'purpose': purpose,
+        'aad': aad,
+      });
+    }
+    return _decryptJsonInline(mk, token, purpose, aad);
   }
 
   /// Encrypt the user-instructions backup payload.
@@ -486,16 +661,17 @@ class ZkCrypto {
     return 'zk1:${base64Url.encode(combined)}';
   }
 
-  /// Decrypt a `zk1` envelope. Throws on format or tag failure.
+  /// Decrypt a `zk1` envelope, or a `zk2` one (returned inflated). Throws
+  /// on format or tag failure.
   static Future<Uint8List> decryptWithMk(
     Uint8List mk,
     String token,
     String purpose,
     String aad,
   ) async {
-    if (!token.startsWith('zk1:')) {
+    if (!token.startsWith(_zk1Prefix) && !token.startsWith(_zk2Prefix)) {
       throw const FormatException(
-          'Not a ZK-encrypted payload (missing zk1: prefix)');
+          'Not a ZK-encrypted payload (missing zk1:/zk2: prefix)');
     }
     if (token.length >= _zkOffloadBytes) {
       return offloadCompute(_zkDecryptWithMkWorker, {
@@ -505,21 +681,7 @@ class ZkCrypto {
         'aad': aad,
       });
     }
-    final b64 = token.substring(4);
-    final combined = base64Url.decode(b64);
-    if (combined.length < 28) {
-      throw const FormatException('Invalid ZK ciphertext length');
-    }
-    final nonce = combined.sublist(0, 12);
-    final cipherText = combined.sublist(12, combined.length - 16);
-    final tag = combined.sublist(combined.length - 16);
-    final dataKey = await deriveDataKey(mk, purpose);
-    final cleartext = await _aesGcm.decrypt(
-      SecretBox(cipherText, nonce: nonce, mac: Mac(tag)),
-      secretKey: dataKey,
-      aad: utf8.encode(aad),
-    );
-    return _asUint8List(cleartext);
+    return _openEnvelope(mk, token, purpose, aad);
   }
 
   /// Per-purpose data key: HKDF-SHA256 over the MK with salt

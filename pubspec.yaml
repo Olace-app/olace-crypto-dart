@@ -13,6 +13,7 @@ environment:
   sdk: ^3.4.0
 
 dependencies:
+  archive: ^3.6.1
   cryptography: ^2.7.0
 
 dev_dependencies:
