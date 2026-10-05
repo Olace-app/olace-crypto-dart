@@ -8,7 +8,7 @@ The client-side cryptography of [Olace](https://olace.app). This package contain
 - `src/pin_vault.dart`: the PIN vault's three-stage derivation. Argon2id over the PIN, a blinded HMAC round-trip so the server can apply its server-held pepper without ever seeing the PIN, and the vault envelope for the Recovery Key. A database-only leak has no pepper and cannot brute-force vaults offline.
 - `src/recovery_key.dart`: Crockford Base32 Recovery Key formatting and tolerant parsing.
 - `src/p2p_crypto.dart`: the E2EE session core for paired devices. X25519 key agreement, HKDF-SHA256 session keys, AES-256-GCM framing with replay protection, HMAC transcript signing. Byte-compatible mirror of the Go daemon side, [olace-e2ee-go](https://github.com/Olace-app/olace-e2ee-go).
-- `src/mk_transfer_crypto.dart`: device-to-device Master Key transfer. Ephemeral X25519, a number-match short authentication string both devices derive independently, and an envelope that folds the confirmed SAS into the AAD.
+- `src/mk_transfer_crypto.dart`: device-to-device Master Key transfer. Ephemeral X25519, a commit-then-reveal of the requester's key, a number-match short authentication string both devices derive independently, and an envelope that folds the confirmed SAS into the AAD.
 - `src/api/`: the interfaces the closed app implements around this crypto.
 - `src/offload/`: the isolate seam. Large encodes and encrypts run on a worker isolate on native and inline on web; byte output is identical either way.
 

@@ -5,10 +5,11 @@ import 'package:cryptography/cryptography.dart';
 
 import 'p2p_crypto.dart';
 
-/// Cryptographically-bound short authentication string for the standalone
-/// MK transfer flow. Both devices derive an identical instance from the
-/// HKDF transcript over (responder_pub || requester_pub || transfer_id).
-/// User matches the same 3-digit number on both screens to authorize.
+/// Cryptographically-bound short authentication string for an MK transfer.
+/// Both devices derive an identical instance from the HKDF transcript over
+/// (responder_pub || requester_pub || transfer_id). The new device shows
+/// [realSas]; the user taps it among [options] on the device holding the
+/// MK, which checks the tap itself before it encrypts anything.
 class SasChallenge {
   /// Creates a challenge; see [MkTransferCrypto.computeSasOptions].
   const SasChallenge({
@@ -18,7 +19,8 @@ class SasChallenge {
   });
 
   /// The matching 3-digit value, zero-padded ("000".."999"). Both devices
-  /// compute the same value; user must tap this one.
+  /// compute the same value; the new device shows it and the MK holder
+  /// requires the user's tap to equal it.
   final String realSas;
 
   /// 5 zero-padded 3-digit options in deterministic order (same on both
@@ -31,24 +33,136 @@ class SasChallenge {
   final String transferId;
 }
 
+/// The requester's commitment to its ephemeral public key, sent before the
+/// responder reveals its own key. See [MkTransferCrypto.commitRequesterKey].
+class MkTransferCommitment {
+  /// Creates a commitment; see [MkTransferCrypto.commitRequesterKey].
+  const MkTransferCommitment({required this.commit, required this.nonce});
+
+  /// base64url SHA-256 digest; crosses in the transfer request.
+  final String commit;
+
+  /// base64url 32-byte random nonce; stays on the requester until it
+  /// reveals its public key.
+  final String nonce;
+}
+
 /// Crypto for transferring the Master Key between two signed-in devices:
-/// ephemeral X25519 + HKDF transfer key, SAS number-match verification,
-/// and an AES-256-GCM envelope with the confirmed SAS folded into the AAD.
+/// ephemeral X25519 + HKDF transfer key, a commit-then-reveal of the
+/// requester's key, SAS number-match verification, and an AES-256-GCM
+/// envelope with the confirmed SAS folded into the AAD.
+///
+/// Message order (every message passes through the server):
+///   1. requester -> responder: [commitRequesterKey] digest only
+///   2. responder -> requester: responder public key
+///   3. requester -> responder: requester public key + nonce, sent only
+///      after step 2 arrived; the requester never accepts a second
+///      responder key after it revealed
+///   4. responder: [verifyRequesterCommit], then the SAS
+///
+/// Without step 1, a server relaying the keys could pick its substitute key
+/// toward the requester after seeing both real keys and grind it until the
+/// two 3-digit SAS values agree (about a thousand tries). With it, both
+/// substitutes are fixed before either real key is known, so the server
+/// gets one blind guess at a 1-in-1000 match and a miss is visible.
 class MkTransferCrypto {
   MkTransferCrypto._();
 
   static final X25519 _x25519 = X25519();
   static final AesGcm _aesGcm = AesGcm.with256bits();
   static final Hkdf _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+  static final Sha256 _sha256 = Sha256();
+
+  /// Length of the random nonce bound into a requester commitment.
+  static const int commitNonceLength = 32;
+
+  static const String _commitLabel = 'olace-mk-commit-v1';
+
+  /// Commit to [requesterEphemeralPub] for [transferId]:
+  /// `SHA-256("olace-mk-commit-v1" || 0x00 || transferId || 0x00 ||
+  /// pub || nonce)`, with a fresh 32-byte nonce.
+  static Future<MkTransferCommitment> commitRequesterKey({
+    required SimplePublicKey requesterEphemeralPub,
+    required String transferId,
+  }) async {
+    final nonce = P2PCrypto.randomBytes(commitNonceLength);
+    final digest = await commitDigest(
+      requesterPublicKey: requesterEphemeralPub.bytes,
+      nonce: nonce,
+      transferId: transferId,
+    );
+    return MkTransferCommitment(
+      commit: base64Url.encode(digest),
+      nonce: base64Url.encode(nonce),
+    );
+  }
+
+  /// The commitment digest over raw inputs; exposed for test vectors.
+  static Future<Uint8List> commitDigest({
+    required List<int> requesterPublicKey,
+    required List<int> nonce,
+    required String transferId,
+  }) async {
+    if (requesterPublicKey.length != 32) {
+      throw const FormatException('Requester public key must be 32 bytes');
+    }
+    if (nonce.length != commitNonceLength) {
+      throw const FormatException('Commit nonce must be 32 bytes');
+    }
+    final hash = await _sha256.hash([
+      ...utf8.encode(_commitLabel),
+      0,
+      ...utf8.encode(transferId),
+      0,
+      ...requesterPublicKey,
+      ...nonce,
+    ]);
+    return Uint8List.fromList(hash.bytes);
+  }
+
+  /// True when [requesterEphemeralPubB64] and [nonceB64] open [commit] for
+  /// [transferId]. Malformed input is false, never an exception.
+  static Future<bool> verifyRequesterCommit({
+    required String commit,
+    required String requesterEphemeralPubB64,
+    required String nonceB64,
+    required String transferId,
+  }) async {
+    try {
+      final expected = _decodeB64(commit);
+      final digest = await commitDigest(
+        requesterPublicKey: _decodeB64(requesterEphemeralPubB64),
+        nonce: _decodeB64(nonceB64),
+        transferId: transferId,
+      );
+      if (expected.length != digest.length) return false;
+      var diff = 0;
+      for (var i = 0; i < digest.length; i++) {
+        diff |= expected[i] ^ digest[i];
+      }
+      return diff == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Uint8List _decodeB64(String value) {
+    final trimmed = value.trim();
+    try {
+      return base64Url.decode(base64Url.normalize(trimmed));
+    } on FormatException {
+      return base64.decode(base64.normalize(trimmed));
+    }
+  }
 
   /// Derive the 5-option SAS challenge for a transfer.
   ///
   /// Both devices independently derive the same challenge from the ECDH
   /// transcript. A machine in the middle substituting either side's
-  /// ephemeral pubkey would produce different option sets on each side,
-  /// and the user refuses on visual mismatch. As defense-in-depth the
-  /// chosen SAS value is folded into the MK-encryption AAD, so even an
-  /// accidental "lucky tap" collision can't unlock the MK.
+  /// ephemeral pubkey produces a different [SasChallenge.realSas] on each
+  /// side, provided the requester committed to its key first (see the
+  /// class comment): the new device then shows a number the MK holder does
+  /// not accept. The SAS is also folded into the MK-encryption AAD.
   ///
   /// Returns a [SasChallenge] with `transferId` populated so downstream
   /// UI / state notifiers can disambiguate concurrent transfers without
@@ -135,12 +249,12 @@ class MkTransferCrypto {
   /// Encrypt an MK payload for transfer.
   ///
   /// [sas] is required — AAD is always `mk-transfer-v2|$transferId|sas=$sas`.
-  /// The old device only calls this AFTER the user has visually verified a
-  /// transcript-derived SAS by tapping the matching number. If a malicious
-  /// backend swapped ephemerals, the SAS values would differ between devices,
-  /// the user wouldn't find a matching number to tap, and the old device
-  /// would never reach this call → no encrypted MK on the wire → no leak.
-  /// The AAD binding is defense-in-depth.
+  /// The old device calls this only after it verified the requester's
+  /// commitment and the user's tap equalled its own [SasChallenge.realSas],
+  /// checked on this device. A server that swapped ephemerals cannot make
+  /// the new device show that number except by a 1-in-1000 blind guess, so
+  /// the old device never reaches this call and no envelope exists to
+  /// steal. The AAD binding is defense-in-depth.
   static Future<String> encryptMk({
     required SimpleKeyPair localKeyPair,
     required SimplePublicKey remotePublicKey,

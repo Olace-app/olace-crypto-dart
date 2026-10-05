@@ -5,6 +5,27 @@ envelope layouts, key derivation parameters) is a new minor version with
 a wire compatibility note here. Never a patch release. The committed
 test vectors change only alongside such a note.
 
+## 0.3.0
+
+Wire compatibility: the MK transfer adds a commitment step. A requester on
+0.3.0 sends `requester_commit` instead of its public key and reveals the key
+only after the responder announced its own; a responder on 0.3.0 refuses a
+request without a commitment. 0.2.x and 0.3.0 devices cannot transfer the MK
+to each other. Every other byte and vector is unchanged.
+
+- `MkTransferCrypto.commitRequesterKey` / `verifyRequesterCommit` /
+  `commitDigest`: `SHA-256("olace-mk-commit-v1" || 0x00 || context || 0x00 ||
+  public key || nonce)` with a 32-byte random nonce; pinned by
+  `test/mk_transfer_commit_test.dart`.
+- Why: every handshake message passes through the server. Without the
+  commitment, a server substituting keys could choose its key toward the
+  requester after seeing both real keys and grind it until the two 3-digit
+  SAS values agree (about a thousand tries). With it, both substitutes are
+  fixed before either real key is known.
+- The device holding the MK compares the user's tap with its own SAS and
+  encrypts only on a match; the requester shows the SAS and accepts one
+  responder key per transfer.
+
 ## 0.2.0
 
 Wire compatibility: adds the `zk2` envelope. Readers of 0.1.x cannot open
