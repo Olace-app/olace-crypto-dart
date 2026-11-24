@@ -44,6 +44,26 @@ Future<Map<String, dynamic>> _encryptP2PEnvelopeWorker(
   };
 }
 
+Future<Map<String, dynamic>?> _decryptP2PEnvelopeWorker(
+  Map<String, dynamic> args,
+) async {
+  try {
+    final cleartext = await AesGcm.with256bits().decrypt(
+      SecretBox(
+        base64Decode(args['ciphertext'] as String),
+        nonce: base64Decode(args['nonce'] as String),
+        mac: Mac(base64Decode(args['tag'] as String)),
+      ),
+      secretKey: SecretKey(args['keyBytes'] as Uint8List),
+      aad: args['aad'] as List<int>,
+    );
+    final decoded = jsonDecode(utf8.decode(cleartext));
+    return decoded is Map<String, dynamic> ? decoded : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 Uint8List _randomBytesWorker(int length) {
   final random = Random.secure();
   final out = Uint8List(length);
@@ -229,7 +249,17 @@ class P2PCryptoContext {
   /// or missing sequence, malformed fields, or GCM authentication failure;
   /// the caller drops the frame either way, so failures are not
   /// distinguished.
-  Future<Map<String, dynamic>?> decrypt(Map<String, dynamic> envelope) async {
+  Future<Map<String, dynamic>?> decrypt(Map<String, dynamic> envelope) {
+    final result = _decryptTail.then((_) => _decryptInOrder(envelope));
+    _decryptTail = result.then<void>((_) {}, onError: (Object _) {});
+    return result;
+  }
+
+  Future<void> _decryptTail = Future<void>.value();
+
+  Future<Map<String, dynamic>?> _decryptInOrder(
+    Map<String, dynamic> envelope,
+  ) async {
     final session = (envelope['session_id'] as String? ?? '').trim();
     if (session != sessionId) return null;
     final seq = (envelope['seq'] as num?)?.toInt();
@@ -241,6 +271,31 @@ class P2PCryptoContext {
     final aad = utf8.encode(
       '$sessionId|$seq|${envelope['sender_key_version'] ?? 0}',
     );
+    if (cipherB64.length >= _p2pJsonOffloadChars) {
+      Uint8List? keyBytes;
+      Map<String, dynamic>? decoded;
+      var offloaded = false;
+      try {
+        keyBytes = Uint8List.fromList(await sessionKey.extractBytes());
+        decoded = await offloadCompute(_decryptP2PEnvelopeWorker, {
+          'ciphertext': cipherB64,
+          'nonce': nonceB64,
+          'tag': tagB64,
+          'aad': aad,
+          'keyBytes': keyBytes,
+        });
+        offloaded = true;
+      } catch (_) {
+        offloaded = false;
+      } finally {
+        keyBytes?.fillRange(0, keyBytes.length, 0);
+      }
+      if (offloaded) {
+        if (decoded == null) return null;
+        _recvSeq = seq;
+        return decoded;
+      }
+    }
     final algo = AesGcm.with256bits();
     try {
       final cleartext = await algo.decrypt(
